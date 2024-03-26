@@ -26,6 +26,9 @@ int Write_Protected_MBR(FILE *fd, struct guid_partition_tbl * ptbl);
 u64 sector_size = 512ULL;
 u64 sector_shift = 9ULL;
 
+tagGDiskInfo DiskInfo;
+int bSparseFill;
+
 u64 DISK_MakeCRC(FILE *outfd)
 {
     u8 * pBuffer; 
@@ -64,11 +67,11 @@ void OnCreateFsImage(tagDiskImageHeader *DiskImageHeader,
     memset(DiskImageHeader, 0x0, sizeof(tagDiskImageHeader));
     memcpy(DiskImageHeader->tagHeader, TAG_AREA_IMAGE_HEADER, 8);
     DiskImageHeader->ulHeaderSize = sizeof(tagDiskImageHeader);
-    strncpy((char *)DiskImageHeader->tagImageType, TAG_AREA_IMAGE_TYPE_DISK_IMAGE, 16);
+    memcpy((char *)DiskImageHeader->tagImageType, TAG_AREA_IMAGE_TYPE_DISK_IMAGE, 16);
     memcpy(DiskImageHeader->tagVersion, TAG_DISK_IMAGE_VERSION, 16);
     //strncpy((char *)DiskImageHeader->areaName, "SD Data" ,16);
     //strncpy((char *)DiskImageHeader->areaName, "SNOR Data" ,16);
-    strncpy((char *)DiskImageHeader->areaName, area_name ,16);
+    memcpy((char *)DiskImageHeader->areaName, area_name ,16);
     memcpy(DiskImageHeader->tagDiskSize, TAG_DISK_IMAGE_SIZE, 8);
     memcpy(DiskImageHeader->tagPartitionCount, TAG_DISK_IMAGE_PARTITION_CNT, 8);
 
@@ -197,22 +200,38 @@ int Write_Secondary_GPT(FILE *fd, struct guid_partition_tbl * ptbl)
 }
 
 int OnCreateGPTHeader(struct guid_partition_tbl *ptbl,
-        struct partition_list *plist, u64 storage_size, u32 nplist)
+        struct partition_list *plist, u64 storage_size, u32 nplist, args_t *mktcimg_args)
 {
-    u32 idx; 
-    u64 npart, size;
+    u32 idx;
+    u64 npart, size, last_lba, tmp;
 
-    npart = GUID_RESERVED;
+    npart = mktcimg_args->partition_offset;
 
     prepare_mbr(ptbl->mbr, storage_size);
     prepare_guid_header(ptbl, storage_size);
     for(idx = 0; idx < nplist; idx++){
         size = plist[idx].size;
         if(size == 0) {
-            size = storage_size - npart - GUID_RESERVED + 1;
+            size = storage_size - npart - mktcimg_args->partition_offset + 1;
             plist[idx].size = size;
         }
-        if(guid_add_partition(ptbl, npart , npart+size-1, plist[idx].name) == -1) {
+
+        last_lba = npart+size-1;
+
+        if((plist[idx].path[0] == 0) && (mktcimg_args->last_part_align == 1) && (idx == nplist-1)) {
+            // check remainder with 4096 bytes align
+            tmp = ((last_lba + 1 - npart) * 512) % 4096;
+            if(tmp) {
+                // calculate Last LBA with 4096 bytes align
+                // Last Partition Size(last LBA - first LBA), LBA unit(512 Bytes)
+                tmp = ((((last_lba + 1 - npart) * 512) - tmp) / 512) + npart - 1;
+
+                DEBUG("Last Partition Align 4096 : Changed Last LBA %lld => %lld \n", last_lba, tmp);
+                last_lba = tmp;
+            }
+        }
+
+        if(guid_add_partition(ptbl, npart , last_lba, plist[idx].name) == -1) {
             return -1;
         }
         npart += size;
@@ -398,7 +417,7 @@ error:
     return -2;
 }
 
-void strupr(char *str)
+void strupr_linux(char *str)
 {
 	int i=0;
 	int len=0;
@@ -411,7 +430,7 @@ void strupr(char *str)
 	}
 }
 
-int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *area_name)
+int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, args_t *mktcimg_args)
 {
     struct guid_partition_tbl ptbl;
     struct uefi_header *hdr = &ptbl.guid_header;
@@ -419,7 +438,7 @@ int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *ar
     tagDiskImageHeader	DiskImageHeader;
     tagDiskImageBunchHeaderType BunchHeader;
 
-    u32 pNum = 0;
+    u32 pNum = 0, pSNum = 0;
     u32 idx;
     char *fbuf = NULL;
     FILE *fplist = NULL;
@@ -439,13 +458,13 @@ int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *ar
     }
 
     /* FWDN HEADER */
-    DiskInfo.ullPartitionInfoStartOffset = 0; 
-    OnCreateFsImage(&DiskImageHeader, pNum , storage_size, area_name);
+    DiskInfo.ullPartitionInfoStartOffset = 0;
+    OnCreateFsImage(&DiskImageHeader, pNum , storage_size, mktcimg_args->area_name);
     if(!fwrite(&DiskImageHeader, sizeof(char), sizeof(tagDiskImageHeader), outfd)){
         FAIL_MSG("Disk Image Header Write Failed \n");
         goto error;
     }
-    DiskInfo.ullPartitionInfoStartOffset = sizeof(tagDiskImageHeader); 
+    DiskInfo.ullPartitionInfoStartOffset = sizeof(tagDiskImageHeader);
 
     BunchHeader.ullTargetAddress = 0;
     BunchHeader.ullLength = sizeof_guid_partition_tbl();
@@ -454,7 +473,7 @@ int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *ar
     }
 
     /* GPT HEADER AND PARTITION ENTRY */
-    if(OnCreateGPTHeader(&ptbl, plist, storage_size, pNum) == -1) {
+    if(OnCreateGPTHeader(&ptbl, plist, storage_size, pNum, mktcimg_args) == -1) {
         goto error;
     }
 
@@ -480,7 +499,9 @@ int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *ar
         ptbl.mbr = NULL;
     }
 
+    DEBUG("DiskInfo.ullPartitionInfoStartOffset : %llu, sizeof(tagDiskImageHeader) = %lu\n", DiskInfo.ullPartitionInfoStartOffset , sizeof(tagDiskImageHeader));
     DiskInfo.ullPartitionInfoStartOffset += get_file_offset(outfd);
+    DEBUG("DiskInfo.ullPartitionInfoStartOffset : %llu, ptbl.guid_entry[0].first_lba = %llu\n", DiskInfo.ullPartitionInfoStartOffset , ptbl.guid_entry[0].first_lba);
 
     for(idx = 0; idx < pNum ; idx++){
         if(plist[idx].size == 0 || plist[idx].path[0] == 0){
@@ -488,10 +509,14 @@ int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *ar
             BunchHeader.ullLength = 0;
             if(Write_BunchHeader(outfd, &BunchHeader)) goto error;
         }else{
-            DEBUG("idx : %d  %s \n", idx , plist[idx].name);
+            DEBUG("idx : %d  %s \n", idx + pSNum , plist[idx].name);
             char tmp[sizeof(plist[idx].path)];
-            strncpy(tmp,(char *)plist[idx].path,sizeof(plist[idx].path));
+            memcpy(tmp,(char *)plist[idx].path,sizeof(plist[idx].path));
+#ifdef WINDOWS
             strupr(tmp);
+#else
+            strupr_linux(tmp);
+#endif
             if(!strcmp(tmp , "FORMAT"))
             {
                 BunchHeader.ullTargetAddress= ptbl.guid_entry[idx].first_lba * sector_size;
@@ -539,17 +564,18 @@ int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *ar
                 }
 
                 if(!check_sparse_image(fplist)){
-                    DEBUG("sparse image is detected !!\n");
                     if(check_sparse_image_size(fplist, plist[idx].size) == -1) {
                             goto error;
                     }
-                    sparse_image_write(fplist, outfd, ptbl.guid_entry[idx].first_lba);
+                    pSNum = pSNum + sparse_image_write(fplist, outfd, ptbl.guid_entry[idx].first_lba);
+                    DEBUG("sparse image is detected !!(Chunk cnt = %d)\n", pSNum);
                 }else{
                     unsigned long long ullPartitionSize
                         = (ptbl.guid_entry[idx].last_lba - ptbl.guid_entry[idx].first_lba + 1)
                             * sector_size;
                     BunchHeader.ullTargetAddress= ptbl.guid_entry[idx].first_lba * sector_size;
                     BunchHeader.ullLength = BYTES_TO_SECTOR(get_file_offset(fplist))*sector_size;
+                    DEBUG("BunchHeader.ullTargetAddress : %llu, BunchHeader.ullLength = %llu\n", BunchHeader.ullTargetAddress, BunchHeader.ullLength);
 
                     if (BunchHeader.ullLength > ullPartitionSize) {
                         FAIL_MSG(
@@ -651,6 +677,7 @@ int mktcimg_gpt(FILE *infd, FILE *outfd, FILE *gptfd, u64 storage_size, char *ar
     }
 
     DiskImageHeader.ulCRC32 = DISK_MakeCRC(outfd);
+    DiskImageHeader.ulPartitionCount = pNum + pSNum + GPT_ADDED_PART_CNT;
     fseek(outfd, 0, SEEK_SET);
     if(!fwrite(&DiskImageHeader, sizeof(char), sizeof(tagDiskImageHeader), outfd)){
         FAIL_MSG("outfile write error\n");
@@ -692,6 +719,7 @@ int mktcimg_raw(FILE *infd, FILE *outfd, u64 storage_size, char *area_name)
 
     FILE *fplist = NULL;
     pinfo = malloc(sizeof(partition_info));
+    memset(pinfo,0x00,sizeof(partition_info));
     pNum = parse_file_line(infd);
     plist = parse_gpt_ptn(infd, pNum);
 
@@ -816,40 +844,46 @@ error:
 
 int split_gpt(char* gpt_name, FILE *gptfd)
 {
-	const int primary_sector = 34;
+    const int primary_sector = 34;
 
-	char* gpt_primary_name;
-	char* gpt_backup_name;
+    char* gpt_primary_name;
+    char* gpt_backup_name;
 
-	char buf[primary_sector * sector_size];
+    char buf[primary_sector * sector_size];
 
-	FILE *gpt_primary;
-	FILE *gpt_backup;
+    FILE *gpt_primary;
+    FILE *gpt_backup;
 
-	gpt_primary_name = (char*)malloc(strlen(gpt_name) + 6);
-	gpt_backup_name = (char*)malloc(strlen(gpt_name) + 6);
+    gpt_primary_name = (char*)malloc(strlen(gpt_name) + 6);
+    gpt_backup_name = (char*)malloc(strlen(gpt_name) + 6);
 
-	sprintf(gpt_primary_name, "%s.prim", gpt_name);
-	sprintf(gpt_backup_name, "%s.back", gpt_name);
+    sprintf(gpt_primary_name, "%s.prim", gpt_name);
+    sprintf(gpt_backup_name, "%s.back", gpt_name);
 
-	gpt_primary = fopen(gpt_primary_name, "w+");
-	gpt_backup = fopen(gpt_backup_name, "w+");
+    gpt_primary = fopen(gpt_primary_name, "w+");
+    gpt_backup = fopen(gpt_backup_name, "w+");
 
-	fseek(gptfd, 0, SEEK_SET);
+    fseek(gptfd, 0, SEEK_SET);
 
-	fread(buf, 1, primary_sector * sector_size, gptfd);
-	fwrite(buf, 1, primary_sector * sector_size, gpt_primary);
+    if (fread(buf, 1, primary_sector * sector_size, gptfd) <= 0) {
+        DEBUG("fread failed\n");
+        return -1;
+    }
+    fwrite(buf, 1, primary_sector * sector_size, gpt_primary);
 
-	fread(buf, 1, (primary_sector - 1) * sector_size, gptfd);
-	fwrite(buf, 1, (primary_sector - 1) * sector_size, gpt_backup);
+    if (fread(buf, 1, (primary_sector - 1) * sector_size, gptfd) <= 0) {
+        DEBUG("fread failed\n");
+        return -1;
+    }
+    fwrite(buf, 1, (primary_sector - 1) * sector_size, gpt_backup);
 
-	fclose(gpt_primary);
-	fclose(gpt_backup);
+    fclose(gpt_primary);
+    fclose(gpt_backup);
 
-	free(gpt_primary_name);
-	free(gpt_backup_name);
+    free(gpt_primary_name);
+    free(gpt_backup_name);
 
-	return 0;
+    return 0;
 }
 
 int make_fai(args_t *mktcimg_args)
@@ -882,7 +916,7 @@ int make_fai(args_t *mktcimg_args)
 			}
 		}
 
-		res = mktcimg_gpt (infd, outfd, gptfd, storage_size, mktcimg_args->area_name);
+		res = mktcimg_gpt (infd, outfd, gptfd, storage_size, mktcimg_args);
 		if(res == 0 && gptfd != NULL) {
 			res = split_gpt(mktcimg_args->gptfile, gptfd);
 		}
@@ -921,9 +955,9 @@ int main(int argc , char **argv)
 {
     int res = 0;
     args_t mktcimg_args;
-    bSparseFill = 0;
+	bSparseFill = 0;
 
-    DEBUG("[mktcimg] v1.2.1 - %s %s\n", __DATE__, __TIME__);
+    DEBUG("[mktcimg] v1.4.2 - %s %s\n", __DATE__, __TIME__);
 
     init_args(&mktcimg_args);
 

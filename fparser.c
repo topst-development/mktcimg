@@ -85,15 +85,17 @@ struct partition_list* parse_gpt_ptn(FILE *fp, u32 nline)
 	idx = 0;
 	fseek(fp, 0, SEEK_SET);
 
+	DEBUG("========== Parsing Partition List==========\n");
 	while(fgets(text, sizeof(text), fp))
 	{
+		DEBUG("PART %d====================\n",idx+1);
 		p = strtok(text, ":");
 		memcpy(plist[idx].name, p, strlen(p));
-		DEBUG("location : %s \n", plist[idx].name);
+		DEBUG("name : %s \n", plist[idx].name);
 		p = strtok(NULL , "@");
 		plist[idx].size = BYTES_TO_SECTOR(parse_size(p));
 		plist[idx].byte_size = parse_size(p);
-		DEBUG("location : %llu sector(%llu byte)\n", plist[idx].size, plist[idx].byte_size);
+		DEBUG("size : %llu sector(%llu byte)\n", plist[idx].size, plist[idx].byte_size);
 		p = strtok(NULL, "\r\n");
 		if(p == NULL) {
 			p = strtok(NULL, "\n");
@@ -101,13 +103,14 @@ struct partition_list* parse_gpt_ptn(FILE *fp, u32 nline)
 		if(p != NULL){
 			memcpy(plist[idx].path, p, strlen(p));
 			DEBUG("location : %s \n", plist[idx].path);
+		} else {
+			DEBUG("location : (NULL) \n");
 		}
 		idx++;
 		if(idx >= nline) {
 			break;
 		}
 	}
-    DEBUG("path : %s \n", plist[0].path);
 	return plist;
 }
 

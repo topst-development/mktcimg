@@ -3,13 +3,15 @@
 #include <stdlib.h>
 
 #include "parse_args.h"
-#include "mktcimg.h"
+#include "gpt.h"
 
 #ifdef WINDOWS
 #include "../windows/getopt.h"
 #else //LINUX
 #include <getopt.h>
 #endif
+
+extern int bSparseFill;
 
 struct option options[] = {
 	{"unpack", required_argument, 0, 'u'},
@@ -21,6 +23,8 @@ struct option options[] = {
 	{"gptfile", required_argument, 0, 'g'},
 	{"sector_size", required_argument, 0, 'b'},
 	{"sparse_fill", required_argument, 0, 'r'},
+	{"partition_offset", required_argument, 0, 't'},
+	{"last_part_align", no_argument, 0, 'l'},
 
 	{"help", no_argument, 0, 'h'},
 };
@@ -85,7 +89,7 @@ int parse_args(int argc, char *argv[], args_t *mktcimg_args)
 	}
 
 	while(1) {
-		opt = getopt_long(argc, argv, "b:u:p:s:f:o:a:g:h:r", options, &index);
+		opt = getopt_long(argc, argv, "b:u:p:s:f:o:a:g:t:h:r:l", options, &index);
 		if(opt == -1) break; //End of Option
 
 		switch(opt) {
@@ -115,6 +119,12 @@ int parse_args(int argc, char *argv[], args_t *mktcimg_args)
 		case 'b':	//sector_size
 			mktcimg_args->sector_size = strtoull(optarg, 0, 10);
 			mktcimg_args->change_sector_size = 1;
+			break;
+		case 't':	//partition_offset
+			mktcimg_args->partition_offset = strtoull(optarg, 0, 10);
+			break;
+		case 'l':	//last partition align
+			mktcimg_args->last_part_align = 1;
 			break;
 		case 'r':	//sparse_fill
 			bSparseFill = 1;
@@ -146,6 +156,8 @@ void init_args(args_t *mktcimg_args)
 	mktcimg_args->fplist = NULL;
 	mktcimg_args->unpack = NULL;
 	mktcimg_args->change_sector_size = 0;
+	mktcimg_args->partition_offset = GUID_RESERVED;
+	mktcimg_args->last_part_align = 0;
 }
 
 void print_args_info(args_t *mktcimg_args)
@@ -160,6 +172,8 @@ void print_args_info(args_t *mktcimg_args)
 		DEBUG("--fplist : %s\n", mktcimg_args->fplist);
 		DEBUG("--sector_size : %d\n", mktcimg_args->sector_size);
 		DEBUG("--sparse_fill : %d\n", bSparseFill);
+		DEBUG("--partition_offset : %llu LBA(%llu)\n", mktcimg_args->partition_offset, (mktcimg_args->partition_offset * 512));
+		DEBUG("--last_part_align : %d\n", mktcimg_args->last_part_align);
 	} else {
 		DEBUG("--unpack : %s\n", mktcimg_args->unpack);
 	}
@@ -214,6 +228,10 @@ void ussage(void)
 	"-r, --sparse_fill                         Sparse Image CHUNK_TYPE_FILL Function Disable \n"
 	"                                          If the option is used, the fill in the sparse image acts as doncare.\n"
 	"                                          Default value : 0(CHUNK_TYPE_FILL Function enable)\n"
+	"-t, --partition_offset                    Set offset of first partition\n"
+	"                                          Must be upper than GUID_RESERVED(34)\n"
+	"                                          Default value : 34(GUID_RESERVED)\n"
+	"-l, --last_part_align                     Force set last partition align 4096\n"
 	"-h, --help                                Print help message\n"
 	);
 }
@@ -244,6 +262,12 @@ int check_args(args_t *mktcimg_args)
 
 		if(mktcimg_args->storage_size == 0) {
 			FAIL_MSG("Please check argument of \"--storage_size\"\n");
+			res = -1;
+		}
+
+		if(mktcimg_args->partition_offset < GUID_RESERVED) {
+			FAIL_MSG("Please check argument of \"--partition_offset\"\n");
+			FAIL_MSG("Must be upper than 34(GUID_RESERVED)\n");
 			res = -1;
 		}
 

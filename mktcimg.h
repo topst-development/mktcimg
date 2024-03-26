@@ -24,6 +24,9 @@
 #define SIZE_OF_MBR             0x4000
 #define SIZE_OF_EBR             0x4000
 
+#define GPT_ADDED_PART_CNT      3 /* Added Chunk 0(Protected MBR + GPT Header + GPT Partition Table),
+                                     Secandary GPT Header, Secandary GPT Partition Table*/
+
 
 
 typedef struct {
@@ -63,8 +66,6 @@ struct partition_list {
     u8     parttype;
 };
 
-tagGDiskInfo DiskInfo;
-int bSparseFill;
 unsigned long long get_file_offset(FILE *fd);
 int Write_BunchHeader(FILE *fd , tagDiskImageBunchHeaderType *BunchHeader);
 

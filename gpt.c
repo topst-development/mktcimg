@@ -82,7 +82,7 @@ int guid_add_partition(struct guid_partition_tbl *ptbl, u64 first_lba,
 		entry->first_lba = first_lba;
 		entry->last_lba = last_lba;
 
-		DEBUG("uuid : %s , part-name : %s \n", str, name);
+		DEBUG("uuid : %s , part-name : %s, first_lba : %llu, last_lba : %llu\n", str, name, first_lba, last_lba);
 		for(idx = 0; (idx < MAX_GPT_NAME_SIZE / 2 ) && *name ; idx++)
 			entry->name[idx*2] = *name++;
 

@@ -44,7 +44,7 @@ int calc_bunch(unsigned int pcnt, unsigned int part_type)
             DEBUG("pcnt : %x \n " , pcnt);
             break;
         case 2:
-            return pcnt + 3; // partition count + MBR + GPT_HEADER + PART_ENTRY
+            return pcnt; // partition count + MBR + GPT_HEADER + PART_ENTRY
             DEBUG("pcnt : %x \n " , pcnt);
             break;
         default:
@@ -60,7 +60,10 @@ int parse_bunch(FILE *funpack, unsigned int pcnt , tagDiskImageBunchHeaderType *
 
     for(idx = 0; idx < pcnt ; idx++){
 
-        fread(&hbunch[idx], sizeof(char), sizeof(tagDiskImageBunchHeaderType), funpack);
+        if(fread(&hbunch[idx], sizeof(char), sizeof(tagDiskImageBunchHeaderType), funpack) <= 0) {
+            DEBUG("fread failed\n");
+            return -1;
+        }
         DumpHex(&hbunch[idx], sizeof(tagDiskImageBunchHeaderType));
 
         if(hbunch[idx].ullLength == 0){
@@ -89,7 +92,10 @@ int unpack_mbr_partition(FILE *funpack, unsigned int pcnt , tagDiskImageBunchHea
 
     for(idx = 0; idx < pcnt ; idx++){
 
-        fread(&hbunch[idx], sizeof(char), sizeof(tagDiskImageBunchHeaderType), funpack);
+        if(fread(&hbunch[idx], sizeof(char), sizeof(tagDiskImageBunchHeaderType), funpack) <= 0) {
+            DEBUG("fread failed\n");
+            return -1;
+        }
         DumpHex(&hbunch[idx], sizeof(tagDiskImageBunchHeaderType));
 
         if(hbunch[idx].ullLength == 0){
@@ -98,7 +104,10 @@ int unpack_mbr_partition(FILE *funpack, unsigned int pcnt , tagDiskImageBunchHea
         }
         else if (hbunch[idx].ullLength == 0x200){
 
-            fread(mbr, sizeof(char), sizeof(mbr_record), funpack);
+            if(fread(mbr, sizeof(char), sizeof(mbr_record), funpack) <= 0) {
+                DEBUG("fread failed\n");
+                return -1;
+            }
             if(mbr->mbr_sig == 0xAA55){
                 DEBUG("found MBR OR EBR skip this bunch section \n");
                 continue;
@@ -144,14 +153,22 @@ int unpack_mbr_partition(FILE *funpack, unsigned int pcnt , tagDiskImageBunchHea
 int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size 
         ,unsigned int pcnt , tagDiskImageBunchHeaderType *hbunch)
 {
-    unsigned int idx ,nameidx, partcnt = 0;
-    unsigned long long remain = 0;
+    int ret = 0;
+    unsigned int idx ,nameidx, partcnt = 0, gptpartcnt = 0;
+    unsigned long long remain = 0, part_remain = 0;
+    unsigned long long addr = 0;
+    unsigned long long part_size = 0;
+    unsigned int sparse_cnt = 0;
 
     struct guid_partition_tbl *guid_record;
 
     char *readbuf;
     FILE *outfd;
     char *partname;
+
+    struct partition_list *plist;
+    plist = malloc(sizeof(struct partition_list) * pcnt);
+    memset(plist, 0x0,sizeof(struct partition_list) * pcnt);
 
     readbuf = malloc(sizeof(char) * 0x1000000);
     guid_record = malloc(sizeof(struct guid_partition_tbl));
@@ -169,20 +186,36 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
     for(idx = 0; idx < pcnt ; idx++){
         DEBUG("=====================================\n\n");
         DEBUG("Read address: %d ( 0x%X ) \n", (int)ftell(funpack), (int)ftell(funpack));
-        fread(&hbunch[idx], sizeof(char), sizeof(tagDiskImageBunchHeaderType), funpack);
+        if (fread(&hbunch[idx], sizeof(char), sizeof(tagDiskImageBunchHeaderType), funpack) <= 0) {
+            DEBUG("fread failed\n");
+            return -1;
+        }
         DumpHex(&hbunch[idx], sizeof(tagDiskImageBunchHeaderType));
 
         DEBUG("Target address : %llu Length : %llu\n", hbunch[idx].ullTargetAddress, hbunch[idx].ullLength);
-        DEBUG("pcnt : %d , part_cnt : %d \n" , idx , partcnt);
+        DEBUG("chunk_cnt : %d , part_cnt : %d \n" , idx , partcnt);
 
         if(hbunch[idx].ullTargetAddress !=0 && hbunch[idx].ullLength == 0){
             DEBUG("<< EMPTY PARTITION >>\n");
+            addr = hbunch[idx].ullTargetAddress;
+
+            for(nameidx = 0 ; (nameidx < MAX_GPT_NAME_SIZE / 2); nameidx ++){
+                partname[nameidx] = guid_record->guid_entry[partcnt].name[nameidx*2];
+            }
+            DEBUG("partname : %s (%d)\n" , partname, partcnt);
+            memcpy(plist[idx].name, partname, strlen(partname));
+            plist[idx].size = hbunch[idx+1].ullTargetAddress - addr;
+
+            gptpartcnt++;
             partcnt++;
             continue;
         }else if (hbunch[idx].ullTargetAddress == OFFSET_PROTECTED_MBR
                 && hbunch[idx].ullLength == HEADER_SIZE_PROTECTED_MBR){
             DEBUG("<< PROTECTED MBR (%ld)>>\n", sizeof(guid_record->mbr));
-            fread(guid_record->mbr, sizeof(char), sizeof(guid_record->mbr), funpack);
+            if (fread(guid_record->mbr, sizeof(char), sizeof(guid_record->mbr), funpack) <= 0) {
+                DEBUG("fread failed\n");
+                return -1;
+            }
 
             DEBUG("Size of Protected MBR structure : %llu\n", sector_size);
             outfd = fopen("protected_mbr.img", "w+");
@@ -194,14 +227,17 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
             }
             fclose(outfd);
 
-            DEBUG("pcnt : %d , part_cnt : %d  uuid : %s \n"
+            DEBUG("chunk_cnt : %d , part_cnt : %d  uuid : %s \n"
                     , idx , partcnt, guid_record->guid_entry[0].unique_partition_guid);
             continue;
         }else if (hbunch[idx].ullTargetAddress == OFFSET_GPT_ENTRY
                 && hbunch[idx].ullLength == HEADER_SIZE_GPT_ENTRY){
             DEBUG("<< GPT ENTRY INFO >>\n");
-            fread(guid_record->guid_entry, sizeof(char), 
-                    sizeof(struct gpt_partition_entry) * ENTRY_SIZE, funpack);
+            if (fread(guid_record->guid_entry, sizeof(char),
+                    sizeof(struct gpt_partition_entry) * ENTRY_SIZE, funpack) <= 0) {
+                DEBUG("fread failed\n");
+                return -1;
+            }
 
             outfd = fopen("gpt_entry.img", "w+");
             if ( outfd == NULL )
@@ -225,10 +261,40 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
             //DumpHex(guid_record->guid_entry , sizeof(struct gpt_partition_entry) * ENTRY_SIZE);
             continue;
 
+        } else if (hbunch[idx].ullTargetAddress == (disk_size - HEADER_SIZE_GPT_ENTRY - HEADER_SIZE_GPT_HEADER)
+                && hbunch[idx].ullLength == HEADER_SIZE_GPT_ENTRY){
+            DEBUG("<< Secondary GPT ENTRY INFO >>\n");
+            if (fread(guid_record->guid_entry, sizeof(char),
+                    sizeof(struct gpt_partition_entry) * ENTRY_SIZE, funpack) <= 0) {
+                DEBUG("fread failed\n");
+                return -1;
+            }
+
+            outfd = fopen("second_gpt_entry.img", "w+");
+            if ( outfd == NULL )
+                continue;
+
+            if(!fwrite(guid_record->guid_entry , sizeof(char),  sizeof(struct gpt_partition_entry) *
+                        ENTRY_SIZE , outfd)){
+                DEBUG("Secondary GPT header writing failed\n");
+            }
+            fclose(outfd);
+
+            int i;
+            for(i=0; i<ENTRY_SIZE; i++){
+                memset(partname, 0, 128);
+                for(nameidx = 0 ; (nameidx < MAX_GPT_NAME_SIZE / 2); nameidx ++)
+                    partname[nameidx] = guid_record->guid_entry[i].name[nameidx*2];
+
+                if(partname[0] != 0x00)
+                    DEBUG("partname : %s\n" , partname);
+            }
+            //DumpHex(guid_record->guid_entry , sizeof(struct gpt_partition_entry) * ENTRY_SIZE);
+            continue;
+
         } else if (hbunch[idx].ullTargetAddress == OFFSET_GPT_HEADER && hbunch[idx].ullLength == HEADER_SIZE_GPT_HEADER){
             DEBUG("<< GPT Header (%d) >>\n", (int)sizeof(guid_record->alloc));
             int ret = fread(guid_record->alloc, sizeof(char), sizeof(guid_record->alloc), funpack);
-            //int ret = fread(guid_record->alloc,  sizeof(guid_record->alloc), 1,  funpack);
             DEBUG("Size of read bytes : %d\n", ret);
             outfd = fopen("gpt_header.img", "w+");
             if ( outfd == NULL )
@@ -240,10 +306,27 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
             fclose(outfd);
             //DumpHex(guid_record->alloc , sizeof(guid_record->alloc));
             continue;
+        } else if (hbunch[idx].ullTargetAddress == (disk_size - HEADER_SIZE_GPT_HEADER) && hbunch[idx].ullLength == HEADER_SIZE_GPT_HEADER){
+            DEBUG("<< Secandary GPT Header (%d) >>\n", (int)sizeof(guid_record->alloc));
+            int ret = fread(guid_record->alloc, sizeof(char), sizeof(guid_record->alloc), funpack);
+            DEBUG("Size of read bytes : %d\n", ret);
+            outfd = fopen("second_gpt_header.img", "w+");
+            if ( outfd == NULL )
+                continue;
+
+            if(!fwrite(guid_record->alloc , sizeof(char), sizeof(guid_record->alloc), outfd)){
+                FAIL_MSG("Secondary GPT header writing failed\n");
+            }
+            fclose(outfd);
+            //DumpHex(guid_record->alloc , sizeof(guid_record->alloc));
+            continue;
         } else if (hbunch[idx].ullTargetAddress == 0 && hbunch[idx].ullLength == 0x4400){
         /* PROTECTED MBR */
             DEBUG("<< PROTECTED MBR (%d)>>\n", 512);//sizeof(guid_record->mbr));
-            fread(guid_record->mbr, sizeof(char), 512/*sizeof(guid_record->mbr)*/, funpack);
+            if (fread(guid_record->mbr, sizeof(char), 512/*sizeof(guid_record->mbr)*/, funpack) <= 0) {
+                DEBUG("fread failed\n");
+                return -1;
+            }
 
             DEBUG("Size of Protected MBR structure : %d\n", (int)sector_size);
             outfd = fopen("protected_mbr.img", "w+");
@@ -255,13 +338,12 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
             }
             fclose(outfd);
 
-            DEBUG("pcnt : %d , part_cnt : %d  uuid : %s \n"
+            DEBUG("chunk_cnt : %d , part_cnt : %d  uuid : %s \n"
                     , idx , partcnt, guid_record->guid_entry[0].unique_partition_guid);
 
             /* GPT Header */
             DEBUG("<< GPT Header (%d) >>\n", (int)sizeof(guid_record->alloc));
             int ret = fread(guid_record->alloc, sizeof(char), sizeof(guid_record->alloc), funpack);
-            //int ret = fread(guid_record->alloc,  sizeof(guid_record->alloc), 1,  funpack);
             DEBUG("Size of read bytes : %d\n", ret);
             outfd = fopen("gpt_header.img", "w+");
             if ( outfd == NULL )
@@ -274,8 +356,11 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
 
             /* GPT ENTRY INFO */
             DEBUG("<< GPT ENTRY INFO >>\n");
-            fread(guid_record->guid_entry, sizeof(char),
-                    sizeof(struct gpt_partition_entry) * ENTRY_SIZE, funpack);
+            if (fread(guid_record->guid_entry, sizeof(char),
+                    sizeof(struct gpt_partition_entry) * ENTRY_SIZE, funpack) <= 0) {
+                DEBUG("fread failed\n");
+                return -1;
+            }
 
             outfd = fopen("gpt_entry.img", "w+");
             if ( outfd == NULL )
@@ -300,14 +385,42 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
          } else {
 
             remain = hbunch[idx].ullLength;
+            addr = hbunch[idx].ullTargetAddress;
+
          //   fread(&guid_record->guid_entry[partcnt], sizeof(char),sizeof(struct gpt_partition_entry), funpack);
             for(nameidx = 0 ; (nameidx < MAX_GPT_NAME_SIZE / 2); nameidx ++){
                 partname[nameidx] = guid_record->guid_entry[partcnt].name[nameidx*2];
             }
-            //sprintf( partname, "%d" , partcnt);
-            DEBUG("partname : %s (%d)\n" , partname, partcnt);
-            strcat(partname ,".img");
-            outfd = fopen(partname, "w+");
+
+            if(part_remain == 0) {
+                DEBUG("partname : %s (%d)\n" , partname, partcnt);
+                memcpy(plist[idx].name, partname, strlen(partname));
+            } else {
+                DEBUG("<< SPARSE IMAGE >>\n");
+                memcpy(plist[idx].name, "SPARSE", strlen("SPARSE"));
+                sparse_cnt++;
+            }
+
+            part_size = ((guid_record->guid_entry[partcnt].last_lba - guid_record->guid_entry[partcnt].first_lba) + 1) *512;
+            part_remain += (hbunch[idx+1].ullTargetAddress - addr);
+
+            if (sparse_cnt == 0) {
+                sprintf(partname, "%s%s", partname, ".img");
+                outfd = fopen(partname, "w+");
+            } else {
+                sprintf(partname, "%s%s", partname, ".img");
+                outfd = fopen(partname, "at+");
+            }
+
+            if (part_size == part_remain) {
+                plist[idx - sparse_cnt].size = part_remain;
+                partcnt++;
+                part_remain  = 0;
+                sparse_cnt = 0;
+            }
+            gptpartcnt++;
+
+            DEBUG("part_size = %lld, part_remain = %lld, plist[idx-1].size = %lld, sparse_cnt = %d\n", part_size, part_remain, plist[idx].size, sparse_cnt);
 
             while(remain){
                 memset(readbuf, 0x0, 0x100000);
@@ -318,7 +431,6 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
                     if(!fwrite(readbuf, sizeof(char), 0x100000, outfd))
                         return -1;
                     remain -= 0x100000;
-
                 }else{
                     if(!fread(readbuf, sizeof(char), remain, funpack))
                         return -1;
@@ -328,17 +440,64 @@ int unpack_gpt_partition(FILE *funpack, unsigned long long disk_size
                 }
             }
             fclose(outfd);
-            partcnt++;
         }
     }
+
+    ret = make_gpt_partition_list(plist, gptpartcnt);
 
     free(partname);
     free(readbuf);
     free(guid_record->mbr);
     free(guid_record);
-    return 0;
+    free(plist);
+    return ret;
 }
 
+int make_gpt_partition_list(struct partition_list *plist, unsigned int partcnt)
+{
+    FILE *outfd;
+    char line[1024];
+    char tmp[1024];
+    char *partname;
+    partname = malloc(sizeof(char) * 128);
+
+    DEBUG("\n=====================================\n\n");
+    DEBUG("Making GPT Partition List ... (part cnt = %d)\n", partcnt);
+
+    outfd = fopen("gpt_partition.list", "w+t");
+    if ( outfd == NULL )
+        return -1;
+
+    for(unsigned int i = 1; i < partcnt+1 ; i++) {
+        sprintf(line, "%s", (char *)(plist[i].name));
+        if(strcmp("SPARSE", line) != 0) {
+            sprintf(tmp, "%s", ":");
+            strcat(line, tmp);
+            if (plist[i].size%1024 ==0) {
+                sprintf(tmp, "%lld", (plist[i].size/1024));
+                strcat(line, tmp);
+                sprintf(tmp, "%s", "k");
+            } else {
+                if(i == partcnt) {
+                    sprintf(tmp, "%s", "0k");
+                } else {
+                    sprintf(tmp, "%lld", (plist[i].size));
+                }
+            }
+            strcat(line, tmp);
+            sprintf(tmp, "%s\n", "@");
+            strcat(line, tmp);
+
+            if(!fwrite(line, sizeof(char), strlen(line), outfd)){
+                    DEBUG("GPT Partition List File writing failed\n");
+            }
+        }
+    }
+
+    free(partname);
+    fclose(outfd);
+    return 0;
+}
 
 int unpack_fai(char *filename)
 {
@@ -363,7 +522,10 @@ int unpack_fai(char *filename)
         FAIL_MSG("file : %s is not exist\n", filename);
         return -1;
     }
-    fread(hfwdn, sizeof(char), sizeof(tagDiskImageHeader), funpack);
+    if (fread(hfwdn, sizeof(char), sizeof(tagDiskImageHeader), funpack) <= 0) {
+        DEBUG("fread failed\n");
+        return -1;
+    }
     DumpHex(hfwdn, sizeof(tagDiskImageHeader));
 
     DEBUG("number of patition : %d \n" , hfwdn->ulPartitionCount);
@@ -373,7 +535,10 @@ int unpack_fai(char *filename)
     DEBUG("Disk Size : %llx \n" , hfwdn->llDiskSize);
 
     fseek(funpack, sizeof(tagDiskImageHeader) + sizeof(tagDiskImageBunchHeaderType), SEEK_SET);
-    fread(mbr, sizeof(char), sizeof(mbr_record), funpack);
+    if (fread(mbr, sizeof(char), sizeof(mbr_record), funpack) <= 0) {
+        DEBUG("fread failed\n");
+        return -1;
+    }
     DumpHex(mbr, sizeof(mbr_record));
 
     part_type = check_part_type(mbr);

@@ -10,6 +10,8 @@ typedef struct {
     char* unpack;
 	int sector_size;
 	u64 change_sector_size;
+	u64 partition_offset;
+	int last_part_align;
 } args_t;
 
 int parse_args(int argc, char *argv[], args_t* mktcimg_args);

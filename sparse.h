@@ -31,3 +31,4 @@ typedef struct chunk_header {
 int check_sparse_image(FILE *);
 int sparse_image_write(FILE *infd, FILE *outfd, u64 uLba);
 int check_sparse_image_size(FILE *infd, u64 partition_size);
+int get_sparse_chunk_count(FILE *fd);
